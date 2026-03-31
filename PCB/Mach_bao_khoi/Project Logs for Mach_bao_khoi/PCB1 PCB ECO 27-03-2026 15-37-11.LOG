@@ -1,0 +1,3 @@
+Change Component Comment : Designator=J1 Old Comment=J1 New Comment=JP1
+Change Component Designator: OldDesignator=J1 NewDesignator=JP?
+Added Member To Class: ClassName=Sheet1 Member=Component JP? JP1

@@ -1,0 +1,4 @@
+Change Component Footprint: Designator=J1 Old Footprint=CON RF New Footprint=CON RF
+Added Pin To Net: NetName=GND Pin=U1-17
+Added Pin To Net: NetName=NetC3_2 Pin=U1-22
+Change Net Name : Old Net Name=NetC3_2 New Net Name=RST

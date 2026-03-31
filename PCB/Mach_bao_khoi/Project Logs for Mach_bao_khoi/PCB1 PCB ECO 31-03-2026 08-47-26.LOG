@@ -1,0 +1,9 @@
+Change Component Footprint: Designator=J1 Old Footprint=CON RF New Footprint=CON RF
+Change Component Designator: OldDesignator=JP? NewDesignator=Nguon
+Added Member To Class: ClassName=Sheet1 Member=Component C2 10uF
+Added Member To Class: ClassName=Sheet1 Member=Component C3 100nF
+Added Member To Class: ClassName=Sheet1 Member=Component R1 10k
+Added Member To Class: ClassName=Sheet1 Member=Component R2 10k
+Added Member To Class: ClassName=Sheet1 Member=Component R12 1k
+Added Member To Class: ClassName=Sheet1 Member=Component SW1 RESET
+Added Room: Name=Sheet1
