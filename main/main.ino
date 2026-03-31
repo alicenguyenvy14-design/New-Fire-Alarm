@@ -1,80 +1,26 @@
-/*
-  ============================================================
-  HE THONG BAO KHOI DUNG ESP32
-  ------------------------------------------------------------
-  Mapping chan:
-
-  IC cu chan 1  -> 3V3 ESP32
-  IC cu chan 16 -> GND ESP32
-  IC cu chan 15 -> GPIO34 (ADC doc cam bien J1)
-  IC cu chan 7  -> GPIO25 (dieu khien phat J2)
-  IC cu chan 5  -> GPIO26 (coi)
-  IC cu chan 6  -> GPIO27 (LED trang thai)
-  IC cu chan 4  -> GPIO33 (nut test)
-
-  Cach noi ngoai vi:
-  - J1 thu:
-      3.3V --- 10k ---+--- GPIO34
-                      |
-                     J1
-                      |
-                     GND
-
-  - J2 phat:
-      3.3V --- 220R --- J2 --- GPIO25
-
-  - Coi:
-      GPIO26 --- coi --- GND
-
-  - LED trang thai:
-      GPIO27 --- 220R --- LED --- GND
-
-  - Nut test:
-      GPIO33 --- nut --- GND
-      (dung INPUT_PULLUP)
-
-  Luu y:
-  - GPIO25 keo LOW thi J2 phat sang
-  - GPIO34 chi la input, dung rat hop cho ADC
-  ============================================================
-*/
-
 // ================== KHAI BAO CHAN ==================
-#define SMOKE_ADC_PIN     34   // Chan 15 IC cu - ADC doc cam bien khoi
-#define IR_EMIT_PIN       25   // Chan 7  IC cu - phat J2
-#define BUZZER_PIN        26   // Chan 5  IC cu - coi
-#define STATUS_LED_PIN    27   // Chan 6  IC cu - LED nhap nhay dinh ky
-#define TEST_BUTTON_PIN   33   // Chan 4  IC cu - nut test
+#define SMOKE_ADC_PIN     34
+#define IR_EMIT_PIN       25
+#define BUZZER_PIN        26
+#define STATUS_LED_PIN    27
+#define TEST_BUTTON_PIN   33
+#define IC13_PIN          32   // 🔥 THÊM: thay chân 13 IC
 
-// ================== THAM SO HE THONG ==================
-// Gia tri ADC khi buong sach, khong co khoi
+// ================== THAM SO ==================
 int adcClean = 1200;
-
-// Gia tri ADC khi khoi day / che lap nhieu nhat ma ban coi la 100%
 int adcMaxSmoke = 2800;
-
-// Nguong bao dong theo phan tram khoi
 float smokeThresholdPercent = 60.0;
 
-// So mau dung de lay trung binh ADC
 const int adcSamples = 20;
 
-// LED nhap nhay dinh ky moi 30 giay
 const unsigned long statusBlinkIntervalMs = 30000UL;
-
-// Do rong xung nhay LED trang thai
 const unsigned long statusBlinkOnTimeMs = 120UL;
-
-// Chu ky cap nhat ADC
 const unsigned long sensorUpdateIntervalMs = 100UL;
 
-// Neu muon nhay nhanh khi bao dong thi dat = true
 bool blinkFastWhenAlarm = true;
-
-// Chu ky nhay nhanh khi bao dong
 const unsigned long fastBlinkIntervalMs = 300UL;
 
-// ================== BIEN TOAN CUC ==================
+// ================== BIEN ==================
 int adcValue = 0;
 float smokePercent = 0.0;
 bool alarmState = false;
@@ -87,7 +33,7 @@ unsigned long lastFastBlinkMs = 0;
 bool statusLedPulseActive = false;
 bool fastBlinkState = false;
 
-// ================== CAC HAM KHAI BAO ==================
+// ================== HAM ==================
 int readSmokeAverage(int samples);
 float convertADCToSmokePercent(int adc);
 void irEmitterOn(void);
@@ -103,34 +49,24 @@ void setup()
   Serial.begin(115200);
   delay(200);
 
-  // Cau hinh chan output
   pinMode(IR_EMIT_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
+  pinMode(IC13_PIN, OUTPUT);        // 🔥 THÊM
 
-  // Nut test dung keo len noi bo
   pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
 
-  // ADC ESP32
-  analogReadResolution(12);          // Gia tri tu 0 -> 4095
-  analogSetAttenuation(ADC_11db);    // Doc on dinh tren dai dien ap rong hon
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
 
-  // Trang thai ban dau
   digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(IC13_PIN, LOW);      // 🔥 THÊM
   digitalWrite(STATUS_LED_PIN, LOW);
-  irEmitterOff();
 
-  // Bat bo phat hong ngoai
+  irEmitterOff();
   irEmitterOn();
 
-  Serial.println("========================================");
-  Serial.println("He thong bao khoi ESP32 bat dau");
-  Serial.println("GPIO34: ADC doc khoi");
-  Serial.println("GPIO25: Phat J2");
-  Serial.println("GPIO26: Coi");
-  Serial.println("GPIO27: LED trang thai");
-  Serial.println("GPIO33: Nut test");
-  Serial.println("========================================");
+  Serial.println("=== HE THONG BAO KHOI ===");
 }
 
 // ================== LOOP ==================
@@ -138,10 +74,8 @@ void loop()
 {
   unsigned long now = millis();
 
-  // Nut test: nhan giu la kich hoat bao dong gia
   testMode = (digitalRead(TEST_BUTTON_PIN) == LOW);
 
-  // Doc cam bien theo chu ky
   if (now - lastSensorReadMs >= sensorUpdateIntervalMs)
   {
     lastSensorReadMs = now;
@@ -149,68 +83,48 @@ void loop()
     adcValue = readSmokeAverage(adcSamples);
     smokePercent = convertADCToSmokePercent(adcValue);
 
-    // Neu nhan nut test thi uu tien bao dong
     if (testMode)
-    {
       alarmState = true;
-    }
     else
-    {
       alarmState = (smokePercent >= smokeThresholdPercent);
-    }
 
     if (alarmState)
-    {
       alarmOn();
-    }
     else
-    {
       alarmOff();
-    }
 
     printSystemState();
   }
 
-  // Cap nhat LED trang thai
   updateStatusLed();
 }
 
-// ================== DOC ADC TRUNG BINH ==================
+// ================== DOC ADC ==================
 int readSmokeAverage(int samples)
 {
   long sum = 0;
-
   for (int i = 0; i < samples; i++)
   {
     sum += analogRead(SMOKE_ADC_PIN);
     delay(2);
   }
-
-  return (int)(sum / samples);
+  return sum / samples;
 }
 
-// ================== DOI ADC SANG % KHOI ==================
-// Truong hop mac dinh: ADC tang khi khoi tang
+// ================== DOI ADC ==================
 float convertADCToSmokePercent(int adc)
 {
-  // Bao ve tranh chia cho 0
-  if (adcMaxSmoke == adcClean)
-  {
-    return 0.0;
-  }
+  if (adcMaxSmoke == adcClean) return 0.0;
 
-  float percent = (adc - adcClean) * 100.0f / (float)(adcMaxSmoke - adcClean);
+  float percent = (adc - adcClean) * 100.0 / (adcMaxSmoke - adcClean);
 
-  // Gioi han 0 -> 100%
-  if (percent < 0.0f)   percent = 0.0f;
-  if (percent > 100.0f) percent = 100.0f;
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
 
   return percent;
 }
 
-// ================== DIEU KHIEN BO PHAT J2 ==================
-// Mach: 3.3V --- 220R --- J2 --- GPIO25
-// Muon J2 sang thi keo chan GPIO25 xuong LOW
+// ================== IR ==================
 void irEmitterOn(void)
 {
   digitalWrite(IR_EMIT_PIN, LOW);
@@ -221,20 +135,20 @@ void irEmitterOff(void)
   digitalWrite(IR_EMIT_PIN, HIGH);
 }
 
-// ================== DIEU KHIEN COI ==================
+// ================== COI ==================
 void alarmOn(void)
 {
   digitalWrite(BUZZER_PIN, HIGH);
+  digitalWrite(IC13_PIN, HIGH);   // 🔥 CHÂN 13 CHẠY CÙNG
 }
 
 void alarmOff(void)
 {
   digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(IC13_PIN, LOW);
 }
 
-// ================== LED TRANG THAI ==================
-// - Binh thuong: nhay 1 xung ngan moi 30 giay
-// - Bao dong: co the nhay nhanh neu blinkFastWhenAlarm = true
+// ================== LED ==================
 void updateStatusLed(void)
 {
   unsigned long now = millis();
@@ -245,12 +159,11 @@ void updateStatusLed(void)
     {
       lastFastBlinkMs = now;
       fastBlinkState = !fastBlinkState;
-      digitalWrite(STATUS_LED_PIN, fastBlinkState ? HIGH : LOW);
+      digitalWrite(STATUS_LED_PIN, fastBlinkState);
     }
     return;
   }
 
-  // Neu khong bao dong thi LED nhay 1 xung ngan moi 30 giay
   if (!statusLedPulseActive && (now - lastStatusBlinkMs >= statusBlinkIntervalMs))
   {
     lastStatusBlinkMs = now;
@@ -266,23 +179,13 @@ void updateStatusLed(void)
   }
 }
 
-// ================== IN TRANG THAI RA SERIAL ==================
+// ================== SERIAL ==================
 void printSystemState(void)
 {
-  Serial.print("ADC = ");
+  Serial.print("ADC=");
   Serial.print(adcValue);
-
-  Serial.print(" | Smoke = ");
-  Serial.print(smokePercent, 1);
-  Serial.print("%");
-
-  Serial.print(" | Threshold = ");
-  Serial.print(smokeThresholdPercent, 1);
-  Serial.print("%");
-
-  Serial.print(" | Test = ");
-  Serial.print(testMode ? "ON" : "OFF");
-
-  Serial.print(" | Alarm = ");
+  Serial.print(" | Smoke=");
+  Serial.print(smokePercent);
+  Serial.print("% | Alarm=");
   Serial.println(alarmState ? "ON" : "OFF");
 }
