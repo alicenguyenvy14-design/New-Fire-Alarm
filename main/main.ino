@@ -1,105 +1,230 @@
-// ================== KHAI BAO CHAN ==================
-#define SMOKE_ADC_PIN     34
-#define IR_EMIT_PIN       25
-#define BUZZER_PIN        26
-#define STATUS_LED_PIN    27
-#define TEST_BUTTON_PIN   33
-#define IC13_PIN          32   // 🔥 THÊM: thay chân 13 IC
+#include <Arduino.h>
 
-// ================== THAM SO ==================
-int adcClean = 1200;
-int adcMaxSmoke = 2800;
-float smokeThresholdPercent = 60.0;
+// ================== RAK3172 PIN MAP ==================
+#define SMOKE_ADC_PIN     PB2
+#define IR_EMIT_PIN       PA10
+#define BUZZER_PIN        PA8
+#define STATUS_LED_PIN    PA9
+#define TEST_BUTTON_PIN   PA1
+#define IC13_PIN          PA15
 
-const int adcSamples = 20;
+// ================== LORAWAN OTAA KEYS ==================
+uint8_t nodeDeviceEUI[8] = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+uint8_t nodeAppEUI[8]    = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+uint8_t nodeAppKey[16]   = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+                             0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
 
-const unsigned long statusBlinkIntervalMs = 30000UL;
-const unsigned long statusBlinkOnTimeMs = 120UL;
-const unsigned long sensorUpdateIntervalMs = 100UL;
+// ================== THAM SO TOI UU PIN ==================
+const uint32_t sleepIntervalMs = 15000;
+const int adcSamples = 10;
+int smokeAdcThreshold = 650;
 
-bool blinkFastWhenAlarm = true;
-const unsigned long fastBlinkIntervalMs = 300UL;
+const uint8_t smokeConfirmCount = 4;
+const uint32_t reAlarmSendMs = 300000UL;
+
+const uint32_t buttonLongPressMs = 2000UL;
+const uint32_t buttonDebounceMs  = 50UL;
+
+// ===== THAM SO COI PWM =====
+const unsigned int buzzerFreqHz = 4000;
+const unsigned int buzzerDutyPercent = 50;
+const bool buzzerActiveHigh = true;
+
+// ===== DEBUG =====
+const bool enableDebugSerial = false;
 
 // ================== BIEN ==================
 int adcValue = 0;
-float smokePercent = 0.0;
+bool smokeDetected = false;
 bool alarmState = false;
-bool testMode = false;
+bool silenceMode = false;
 
-unsigned long lastSensorReadMs = 0;
-unsigned long lastStatusBlinkMs = 0;
-unsigned long statusLedTurnOffMs = 0;
-unsigned long lastFastBlinkMs = 0;
-bool statusLedPulseActive = false;
-bool fastBlinkState = false;
+uint8_t smokeCount = 0;
+bool joined = false;
+uint32_t lastAlarmSendMs = 0;
+
+// ===== BIEN NUT =====
+bool buttonLastStableState = HIGH;
+bool buttonLastReading = HIGH;
+uint32_t buttonLastChangeMs = 0;
+uint32_t buttonPressedStartMs = 0;
+bool buttonLongPressHandled = false;
+
+// ===== BIEN PWM COI =====
+bool buzzerEnable = false;
+bool buzzerOutputState = false;
+uint32_t lastBuzzerToggleUs = 0;
 
 // ================== HAM ==================
 int readSmokeAverage(int samples);
-float convertADCToSmokePercent(int adc);
 void irEmitterOn(void);
 void irEmitterOff(void);
+
+void buzzerPwmStart(void);
+void buzzerPwmStop(void);
+void buzzerPwmUpdate(void);
+
 void alarmOn(void);
 void alarmOff(void);
-void updateStatusLed(void);
+
+void updateButton(void);
+void enterSleep(void);
+void restorePinsAfterWake(void);
 void printSystemState(void);
+
+bool setupLoRaWAN(void);
+bool ensureJoin(void);
+bool sendAlarmPacket(uint16_t adc, uint8_t confirmCount);
 
 // ================== SETUP ==================
 void setup()
 {
-  Serial.begin(115200);
-  delay(200);
-
   pinMode(IR_EMIT_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
-  pinMode(IC13_PIN, OUTPUT);        // 🔥 THÊM
-
+  pinMode(IC13_PIN, OUTPUT);
   pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
-
   analogReadResolution(12);
-  analogSetAttenuation(ADC_11db);
 
-  digitalWrite(BUZZER_PIN, LOW);
-  digitalWrite(IC13_PIN, LOW);      // 🔥 THÊM
+  digitalWrite(IR_EMIT_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, buzzerActiveHigh ? LOW : HIGH);
   digitalWrite(STATUS_LED_PIN, LOW);
+  digitalWrite(IC13_PIN, LOW);
 
-  irEmitterOff();
-  irEmitterOn();
+  api.system.lpm.set(1);
 
-  Serial.println("=== HE THONG BAO KHOI ===");
+  if (enableDebugSerial)
+  {
+    Serial.begin(115200);
+    delay(200);
+    Serial.println("=== SMOKE ALARM LOW POWER ===");
+  }
+
+  setupLoRaWAN();
 }
 
 // ================== LOOP ==================
 void loop()
 {
-  unsigned long now = millis();
+  // sau moi lan wake, khoi phuc cac chan can dung lai
+  restorePinsAfterWake();
 
-  testMode = (digitalRead(TEST_BUTTON_PIN) == LOW);
+  updateButton();
 
-  if (now - lastSensorReadMs >= sensorUpdateIntervalMs)
+  irEmitterOn();
+  delay(15);
+  adcValue = readSmokeAverage(adcSamples);
+  irEmitterOff();
+
+  smokeDetected = (adcValue >= smokeAdcThreshold);
+
+  if (smokeDetected)
   {
-    lastSensorReadMs = now;
-
-    adcValue = readSmokeAverage(adcSamples);
-    smokePercent = convertADCToSmokePercent(adcValue);
-
-    if (testMode)
-      alarmState = true;
-    else
-      alarmState = (smokePercent >= smokeThresholdPercent);
-
-    if (alarmState)
-      alarmOn();
-    else
-      alarmOff();
-
-    printSystemState();
+    if (smokeCount < 255) smokeCount++;
+  }
+  else
+  {
+    smokeCount = 0;
+    alarmState = false;
+    silenceMode = false;
   }
 
-  updateStatusLed();
+  if (smokeCount >= smokeConfirmCount)
+  {
+    alarmState = true;
+  }
+
+  if (alarmState)
+  {
+    if (!silenceMode)
+    {
+      alarmOn();
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      digitalWrite(IC13_PIN, HIGH);
+    }
+    else
+    {
+      alarmOff();
+      digitalWrite(STATUS_LED_PIN, LOW);
+      digitalWrite(IC13_PIN, LOW);
+    }
+
+    if (lastAlarmSendMs == 0)
+    {
+      if (ensureJoin())
+      {
+        sendAlarmPacket((uint16_t)adcValue, smokeCount);
+      }
+      lastAlarmSendMs = millis();
+    }
+    else if (millis() - lastAlarmSendMs >= reAlarmSendMs)
+    {
+      if (ensureJoin())
+      {
+        sendAlarmPacket((uint16_t)adcValue, smokeCount);
+      }
+      lastAlarmSendMs = millis();
+    }
+
+    while (alarmState)
+    {
+      updateButton();
+      buzzerPwmUpdate();
+
+      irEmitterOn();
+      delay(15);
+      adcValue = readSmokeAverage(adcSamples);
+      irEmitterOff();
+
+      smokeDetected = (adcValue >= smokeAdcThreshold);
+
+      if (!smokeDetected)
+      {
+        if (smokeCount > 0) smokeCount--;
+      }
+      else
+      {
+        if (smokeCount < 255) smokeCount++;
+      }
+
+      if (smokeCount == 0)
+      {
+        alarmState = false;
+        silenceMode = false;
+        lastAlarmSendMs = 0;
+        alarmOff();
+        digitalWrite(STATUS_LED_PIN, LOW);
+        digitalWrite(IC13_PIN, LOW);
+        break;
+      }
+
+      if (!silenceMode)
+      {
+        digitalWrite(STATUS_LED_PIN, HIGH);
+        digitalWrite(IC13_PIN, HIGH);
+      }
+      else
+      {
+        digitalWrite(STATUS_LED_PIN, LOW);
+        digitalWrite(IC13_PIN, LOW);
+      }
+
+      printSystemState();
+      delay(200);
+    }
+  }
+  else
+  {
+    alarmOff();
+    digitalWrite(STATUS_LED_PIN, LOW);
+    digitalWrite(IC13_PIN, LOW);
+
+    printSystemState();
+    enterSleep();
+  }
 }
 
-// ================== DOC ADC ==================
+// ================== ADC ==================
 int readSmokeAverage(int samples)
 {
   long sum = 0;
@@ -108,20 +233,7 @@ int readSmokeAverage(int samples)
     sum += analogRead(SMOKE_ADC_PIN);
     delay(2);
   }
-  return sum / samples;
-}
-
-// ================== DOI ADC ==================
-float convertADCToSmokePercent(int adc)
-{
-  if (adcMaxSmoke == adcClean) return 0.0;
-
-  float percent = (adc - adcClean) * 100.0 / (adcMaxSmoke - adcClean);
-
-  if (percent < 0) percent = 0;
-  if (percent > 100) percent = 100;
-
-  return percent;
+  return (int)(sum / samples);
 }
 
 // ================== IR ==================
@@ -135,57 +247,196 @@ void irEmitterOff(void)
   digitalWrite(IR_EMIT_PIN, HIGH);
 }
 
-// ================== COI ==================
+// ================== NUT NHAN ==================
+void updateButton(void)
+{
+  uint32_t now = millis();
+  bool reading = digitalRead(TEST_BUTTON_PIN);
+
+  if (reading != buttonLastReading)
+  {
+    buttonLastChangeMs = now;
+    buttonLastReading = reading;
+  }
+
+  if ((now - buttonLastChangeMs) >= buttonDebounceMs)
+  {
+    if (reading != buttonLastStableState)
+    {
+      buttonLastStableState = reading;
+
+      if (buttonLastStableState == LOW)
+      {
+        buttonPressedStartMs = now;
+        buttonLongPressHandled = false;
+      }
+      else
+      {
+        buttonPressedStartMs = 0;
+      }
+    }
+  }
+
+  if (buttonLastStableState == LOW && !buttonLongPressHandled)
+  {
+    if ((now - buttonPressedStartMs) >= buttonLongPressMs)
+    {
+      silenceMode = true;
+      buttonLongPressHandled = true;
+
+      if (enableDebugSerial)
+      {
+        Serial.println(">> HOLD 2s: SILENCE");
+      }
+    }
+  }
+}
+
+// ================== COI PWM ==================
+void buzzerPwmStart(void)
+{
+  buzzerEnable = true;
+}
+
+void buzzerPwmStop(void)
+{
+  buzzerEnable = false;
+  buzzerOutputState = false;
+  digitalWrite(BUZZER_PIN, buzzerActiveHigh ? LOW : HIGH);
+}
+
+void buzzerPwmUpdate(void)
+{
+  if (!buzzerEnable) return;
+
+  const uint32_t periodUs = 1000000UL / buzzerFreqHz;
+  const uint32_t highUs = (periodUs * buzzerDutyPercent) / 100;
+  const uint32_t lowUs  = periodUs - highUs;
+
+  uint32_t nowUs = micros();
+  uint32_t intervalUs = buzzerOutputState ? highUs : lowUs;
+
+  if (nowUs - lastBuzzerToggleUs >= intervalUs)
+  {
+    lastBuzzerToggleUs = nowUs;
+    buzzerOutputState = !buzzerOutputState;
+
+    if (buzzerActiveHigh)
+      digitalWrite(BUZZER_PIN, buzzerOutputState ? HIGH : LOW);
+    else
+      digitalWrite(BUZZER_PIN, buzzerOutputState ? LOW : HIGH);
+  }
+}
+
+// ================== BAO DONG ==================
 void alarmOn(void)
 {
-  digitalWrite(BUZZER_PIN, HIGH);
-  digitalWrite(IC13_PIN, HIGH);   // 🔥 CHÂN 13 CHẠY CÙNG
+  buzzerPwmStart();
 }
 
 void alarmOff(void)
 {
-  digitalWrite(BUZZER_PIN, LOW);
+  buzzerPwmStop();
+}
+
+// ================== KHOI PHUC CHAN SAU KHI WAKE ==================
+void restorePinsAfterWake(void)
+{
+  pinMode(IR_EMIT_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  pinMode(IC13_PIN, OUTPUT);
+
+  digitalWrite(IR_EMIT_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, buzzerActiveHigh ? LOW : HIGH);
+  digitalWrite(STATUS_LED_PIN, LOW);
   digitalWrite(IC13_PIN, LOW);
 }
 
-// ================== LED ==================
-void updateStatusLed(void)
+// ================== SLEEP ==================
+void enterSleep(void)
 {
-  unsigned long now = millis();
+  alarmOff();
 
-  if (alarmState && blinkFastWhenAlarm)
-  {
-    if (now - lastFastBlinkMs >= fastBlinkIntervalMs)
-    {
-      lastFastBlinkMs = now;
-      fastBlinkState = !fastBlinkState;
-      digitalWrite(STATUS_LED_PIN, fastBlinkState);
-    }
-    return;
-  }
+  // tat het muc logic truoc
+  digitalWrite(STATUS_LED_PIN, LOW);
+  digitalWrite(IC13_PIN, LOW);
+  digitalWrite(IR_EMIT_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, buzzerActiveHigh ? LOW : HIGH);
 
-  if (!statusLedPulseActive && (now - lastStatusBlinkMs >= statusBlinkIntervalMs))
-  {
-    lastStatusBlinkMs = now;
-    statusLedTurnOffMs = now + statusBlinkOnTimeMs;
-    statusLedPulseActive = true;
-    digitalWrite(STATUS_LED_PIN, HIGH);
-  }
+  // dua cac chan ve INPUT de giam dong ro
+  pinMode(STATUS_LED_PIN, INPUT);   // PA9 LED
+  pinMode(IC13_PIN, INPUT);
+  pinMode(IR_EMIT_PIN, INPUT);
+  pinMode(BUZZER_PIN, INPUT);
 
-  if (statusLedPulseActive && now >= statusLedTurnOffMs)
-  {
-    statusLedPulseActive = false;
-    digitalWrite(STATUS_LED_PIN, LOW);
-  }
+  api.system.sleep.all(sleepIntervalMs);
 }
 
-// ================== SERIAL ==================
+// ================== LORAWAN ==================
+bool setupLoRaWAN(void)
+{
+  if (!api.lorawan.nwm.set()) return false;
+  if (!api.lorawan.njm.set(1)) return false;
+  if (!api.lorawan.band.set(9)) return false;
+  if (!api.lorawan.deviceClass.set(0)) return false;
+
+  api.lorawan.deui.set(nodeDeviceEUI, 8);
+  api.lorawan.appeui.set(nodeAppEUI, 8);
+  api.lorawan.appkey.set(nodeAppKey, 16);
+
+  return true;
+}
+
+bool ensureJoin(void)
+{
+  if (api.lorawan.njs.get() == 1)
+  {
+    joined = true;
+    return true;
+  }
+
+  api.lorawan.join();
+  uint32_t t0 = millis();
+
+  while ((millis() - t0) < 30000UL)
+  {
+    if (api.lorawan.njs.get() == 1)
+    {
+      joined = true;
+      return true;
+    }
+    delay(500);
+  }
+
+  joined = false;
+  return false;
+}
+
+bool sendAlarmPacket(uint16_t adc, uint8_t confirmCount)
+{
+  uint8_t payload[4];
+  payload[0] = 0xA1;
+  payload[1] = (uint8_t)(adc >> 8);
+  payload[2] = (uint8_t)(adc & 0xFF);
+  payload[3] = confirmCount;
+
+  return api.lorawan.send(sizeof(payload), payload, 2, false);
+}
+
+// ================== DEBUG ==================
 void printSystemState(void)
 {
+  if (!enableDebugSerial) return;
+
   Serial.print("ADC=");
   Serial.print(adcValue);
-  Serial.print(" | Smoke=");
-  Serial.print(smokePercent);
-  Serial.print("% | Alarm=");
-  Serial.println(alarmState ? "ON" : "OFF");
+  Serial.print(" | Detect=");
+  Serial.print(smokeDetected ? "YES" : "NO");
+  Serial.print(" | Count=");
+  Serial.print(smokeCount);
+  Serial.print(" | Alarm=");
+  Serial.print((alarmState && !silenceMode) ? "ON" : "OFF");
+  Serial.print(" | Silence=");
+  Serial.println(silenceMode ? "ON" : "OFF");
 }
