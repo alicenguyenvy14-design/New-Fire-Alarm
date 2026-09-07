@@ -4,6 +4,19 @@
 // {"adc":583,"v":0.427,"smoke":65.0,"overTh":1,"alarm":0,"silence":0,"wait":38}
 // =====================================================
 
+// Bo comment dong duoi khi can xem log Serial. Tat mac dinh de giam dong sleep.
+// #define DEBUG_MODE
+
+#ifdef DEBUG_MODE
+  #define DBG_BEGIN(baud)  Serial.begin(baud)
+  #define DBG_PRINT(...)   Serial.print(__VA_ARGS__)
+  #define DBG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#else
+  #define DBG_BEGIN(baud)
+  #define DBG_PRINT(...)
+  #define DBG_PRINTLN(...)
+#endif
+
 // ================== PIN MAP ==================
 #define SMOKE_ADC_PIN     PB2
 #define IR_EMIT_PIN       PA10
@@ -25,10 +38,12 @@ int adcMaxSmoke = 800;               // ADC khoi dam dac
 float smokeThresholdPercent = 30.0;  // Nguong bat bao dong
 float smokeThresholdOffPercent = 25.0; // Nguong tat bao dong
 
-const int adcSamples = 20;
-const unsigned long sensorUpdateIntervalMs = 100UL;
+const int adcSamples = 10;
+const unsigned long sensorUpdateIntervalMs = 1000UL;
 const unsigned long smokeWarmupMs = 15000UL;
 const float smokeFilterAlpha = 0.15;
+const bool pulseIrEmitterForSampling = true;
+const unsigned long irSettleMs = 5UL;
 
 // Dung 3.0V vi log cua ban cho thay 583 -> 0.427V
 const float adcReferenceVoltage = 3.0;
@@ -118,20 +133,28 @@ void updateButtonLogic(void);
 bool buttonPressedEvent(void);
 void updateAlarmLogic(void);
 void updateWaitSeconds(void);
+void sleepLowPower(unsigned long ms);
+void sleepUntilNextEvent(void);
+unsigned long timeUntilMs(unsigned long lastMs, unsigned long intervalMs, unsigned long now);
+unsigned long minNonZero(unsigned long currentMs, unsigned long candidateMs);
 
 // =====================================================
 // SETUP
 // =====================================================
 void setup()
 {
-  Serial.begin(115200);
+  DBG_BEGIN(115200);
+  #ifdef DEBUG_MODE
   delay(1000);
+  #endif
 
   pinMode(IR_EMIT_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(IC13_PIN, OUTPUT);
   pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
+  api.system.lpm.set(1);
+  api.system.sleep.setup(RUI_WAKEUP_FALLING_EDGE, TEST_BUTTON_PIN);
 
   analogReadResolution(12);
 
@@ -140,15 +163,13 @@ void setup()
   digitalWrite(BUZZER_PIN, buzzerActiveHigh ? LOW : HIGH);
 
   irEmitterOff();
-  delay(50);
-  irEmitterOn();
 
   smokeStartMs = millis();
 
-  Serial.println("======================================");
-  Serial.println("RAK3172 SMOKE SENSOR + LORAWAN JSON");
-  Serial.println("======================================");
-  Serial.println("Dang warm-up cam bien khoi...");
+  DBG_PRINTLN("======================================");
+  DBG_PRINTLN("RAK3172 SMOKE SENSOR + LORAWAN JSON");
+  DBG_PRINTLN("======================================");
+  DBG_PRINTLN("Dang warm-up cam bien khoi...");
 
   // Cau hinh LoRaWAN RUI3
   api.lorawan.deui.set(nodeDeviceEUI, 8);
@@ -178,12 +199,13 @@ void loop()
     if (now - smokeStartMs >= smokeWarmupMs)
     {
       smokeSensorReady = true;
-      Serial.println("Cam bien khoi da san sang.");
+      DBG_PRINTLN("Cam bien khoi da san sang.");
     }
     else
     {
       updateStatusLed();
       buzzerPwmUpdate();
+      sleepUntilNextEvent();
       return;
     }
   }
@@ -218,13 +240,14 @@ void loop()
     }
     else
     {
-      Serial.println("Chua join mang, thu join lai...");
+      DBG_PRINTLN("Chua join mang, thu join lai...");
       joinLoRaWAN();
     }
   }
 
   updateStatusLed();
   buzzerPwmUpdate();
+  sleepUntilNextEvent();
 }
 
 // =====================================================
@@ -255,7 +278,7 @@ void updateButtonLogic(void)
           silenceMode = true;
           silenceEndMs = now + silenceDurationMs;
           testMode = false;
-          Serial.println("Silence mode ON");
+          DBG_PRINTLN("Silence mode ON");
         }
         else
         {
@@ -263,7 +286,7 @@ void updateButtonLogic(void)
           testMode = true;
           testEndMs = now + testAlarmDurationMs;
           silenceMode = false;
-          Serial.println("Test mode ON");
+          DBG_PRINTLN("Test mode ON");
         }
       }
     }
@@ -289,7 +312,7 @@ void updateAlarmLogic(void)
   if (silenceMode && now >= silenceEndMs)
   {
     silenceMode = false;
-    Serial.println("Silence mode OFF");
+    DBG_PRINTLN("Silence mode OFF");
   }
 
   // Hysteresis cho muc vuot nguong
@@ -356,25 +379,25 @@ void updateWaitSeconds(void)
 // =====================================================
 bool joinLoRaWAN(void)
 {
-  Serial.println("Dang join LoRaWAN...");
+  DBG_PRINTLN("Dang join LoRaWAN...");
   api.lorawan.join();
 
   int retryCount = 0;
   while (api.lorawan.njs.get() == 0 && retryCount < 30)
   {
-    Serial.println("Dang cho join...");
-    delay(2000);
+    DBG_PRINTLN("Dang cho join...");
+    sleepLowPower(2000);
     retryCount++;
   }
 
   if (api.lorawan.njs.get() == 1)
   {
-    Serial.println("Join LoRaWAN thanh cong!");
+    DBG_PRINTLN("Join LoRaWAN thanh cong!");
     return true;
   }
   else
   {
-    Serial.println("Join LoRaWAN that bai!");
+    DBG_PRINTLN("Join LoRaWAN that bai!");
     return false;
   }
 }
@@ -425,18 +448,18 @@ void sendSmokeStatusJson(void)
            silenceMode ? 1 : 0,
            waitSeconds);
 
-  Serial.print("JSON gui: ");
-  Serial.println(payload);
+  DBG_PRINT("JSON gui: ");
+  DBG_PRINTLN(payload);
 
   bool sendResult = api.lorawan.send(strlen(payload), (uint8_t *)payload, loraFPort, false, 1);
 
   if (sendResult)
   {
-    Serial.println("Gui JSON qua LoRa thanh cong!");
+    DBG_PRINTLN("Gui JSON qua LoRa thanh cong!");
   }
   else
   {
-    Serial.println("Gui JSON qua LoRa that bai!");
+    DBG_PRINTLN("Gui JSON qua LoRa that bai!");
   }
 }
 
@@ -447,10 +470,21 @@ int readSmokeAverage(int samples)
 {
   long sum = 0;
 
+  if (pulseIrEmitterForSampling)
+  {
+    irEmitterOn();
+    sleepLowPower(irSettleMs);
+  }
+
   for (int i = 0; i < samples; i++)
   {
     sum += analogRead(SMOKE_ADC_PIN);
-    delay(2);
+    sleepLowPower(2);
+  }
+
+  if (pulseIrEmitterForSampling)
+  {
+    irEmitterOff();
   }
 
   return (int)(sum / samples);
@@ -583,31 +617,118 @@ void updateStatusLed(void)
 }
 
 // =====================================================
+// LOW POWER SLEEP
+// =====================================================
+void sleepLowPower(unsigned long ms)
+{
+  #ifdef DEBUG_MODE
+  Serial.flush();
+  #endif
+
+  if (ms == 0)
+  {
+    api.system.sleep.all();
+  }
+  else
+  {
+    api.system.sleep.all(ms);
+  }
+}
+
+void sleepUntilNextEvent(void)
+{
+  if (buzzerEnable)
+  {
+    return; // PWM mem cua coi can CPU chay lien tuc.
+  }
+
+  unsigned long now = millis();
+  unsigned long sleepMs = 0;
+
+  if (!smokeSensorReady)
+  {
+    unsigned long warmupLeft = timeUntilMs(smokeStartMs, smokeWarmupMs, now);
+    sleepMs = minNonZero(sleepMs, warmupLeft);
+  }
+  else
+  {
+    sleepMs = minNonZero(sleepMs, timeUntilMs(lastSensorReadMs, sensorUpdateIntervalMs, now));
+    sleepMs = minNonZero(sleepMs, timeUntilMs(lastLoraSendMs, loraSendIntervalMs, now));
+  }
+
+  if (lastButtonReading != buttonStableState)
+  {
+    sleepMs = minNonZero(sleepMs, timeUntilMs(lastDebounceMs, debounceDelayMs, now));
+  }
+
+  if (testMode)
+  {
+    long remainMs = (long)(testEndMs - now);
+    if (remainMs > 0) sleepMs = minNonZero(sleepMs, (unsigned long)remainMs);
+  }
+
+  if (silenceMode)
+  {
+    long remainMs = (long)(silenceEndMs - now);
+    if (remainMs > 0) sleepMs = minNonZero(sleepMs, (unsigned long)remainMs);
+  }
+
+  if (statusLedPulseActive)
+  {
+    long remainMs = (long)(statusLedTurnOffMs - now);
+    if (remainMs > 0) sleepMs = minNonZero(sleepMs, (unsigned long)remainMs);
+  }
+  else
+  {
+    sleepMs = minNonZero(sleepMs, timeUntilMs(lastStatusBlinkMs, statusBlinkIntervalMs, now));
+  }
+
+  if (sleepMs > 0)
+  {
+    sleepLowPower(sleepMs);
+  }
+}
+
+unsigned long timeUntilMs(unsigned long lastMs, unsigned long intervalMs, unsigned long now)
+{
+  unsigned long elapsed = now - lastMs;
+  if (elapsed >= intervalMs) return 0;
+  return intervalMs - elapsed;
+}
+
+unsigned long minNonZero(unsigned long currentMs, unsigned long candidateMs)
+{
+  if (candidateMs == 0) return currentMs;
+  if (currentMs == 0 || candidateMs < currentMs) return candidateMs;
+  return currentMs;
+}
+
+// =====================================================
 // SERIAL DEBUG
 // =====================================================
 void printSystemState(void)
 {
-  Serial.print("ADC=");
-  Serial.print(adcValue);
+  DBG_PRINT("ADC=");
+  DBG_PRINT(adcValue);
 
-  Serial.print(" | V=");
-  Serial.print(sensorVoltage, 3);
-  Serial.print("V");
+  DBG_PRINT(" | V=");
+  DBG_PRINT(sensorVoltage, 3);
+  DBG_PRINT("V");
 
-  Serial.print(" | Smoke=");
-  Serial.print(smokePercent, 1);
-  Serial.print("%");
+  DBG_PRINT(" | Smoke=");
+  DBG_PRINT(smokePercent, 1);
+  DBG_PRINT("%");
 
-  Serial.print(" | OverTh=");
-  Serial.print(overThreshold ? "YES" : "NO");
+  DBG_PRINT(" | OverTh=");
+  DBG_PRINT(overThreshold ? "YES" : "NO");
 
-  Serial.print(" | Alarm=");
-  Serial.print(alarmState ? "ON" : "OFF");
+  DBG_PRINT(" | Alarm=");
+  DBG_PRINT(alarmState ? "ON" : "OFF");
 
-  Serial.print(" | Silence=");
-  Serial.print(silenceMode ? "ON" : "OFF");
+  DBG_PRINT(" | Silence=");
+  DBG_PRINT(silenceMode ? "ON" : "OFF");
 
-  Serial.print(" | Wait=");
-  Serial.print(waitSeconds);
-  Serial.println("s");
+  DBG_PRINT(" | Wait=");
+  DBG_PRINT(waitSeconds);
+  DBG_PRINTLN("s");
 }
